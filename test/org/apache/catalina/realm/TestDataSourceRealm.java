@@ -148,7 +148,201 @@ public class TestDataSourceRealm extends LoggingBaseTest {
         List<String> roles = db.getRoles("tomcat");
         Assert.assertEquals(2, roles.size());
 
-        db.stop();
+        p = db.getPrincipal("blabla");
+        Assert.assertNull(p);
 
+        p = db.getPrincipal("random");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        gp = (GenericPrincipal) p;
+        Assert.assertEquals(0, gp.getRoles().length);
+
+        db.stop();
+    }
+
+    @Test
+    public void testRealmWithoutRoleStore() throws Exception {
+
+        db = new DerbyDataSourceRealm("dsRealmNoRoles");
+        db.setUserTable("users");
+        db.setUserNameCol("user_name");
+        db.setUserCredCol("user_pass");
+
+        // Create only the users table, no role store is configured
+        Connection connection = db.open();
+        for (String sql: SIMPLE_SCHEMA.split(";")) {
+            if (sql.contains("user_roles")) {
+                continue;
+            }
+            try (Statement statement = connection.createStatement()) {
+                statement.execute(sql);
+            }
+        }
+
+        try (PreparedStatement stmt = connection.prepareStatement(USERS_INSERT)) {
+            stmt.setString(1, "tomcat");
+            stmt.setString(2, "password");
+            stmt.executeUpdate();
+        }
+
+        db.start();
+
+        // Default strict mode with no role store. Authentication of a valid
+        // user must succeed with an empty role list rather than fail.
+        Principal p = db.authenticate("tomcat", "bar");
+        Assert.assertNull(p);
+
+        p = db.authenticate("tomcat", "password");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        GenericPrincipal gp = (GenericPrincipal) p;
+        Assert.assertEquals(0, gp.getRoles().length);
+
+        p = db.getPrincipal("tomcat");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        gp = (GenericPrincipal) p;
+        Assert.assertEquals(0, gp.getRoles().length);
+
+        List<String> roles = db.getRoles("tomcat");
+        Assert.assertNotNull(roles);
+        Assert.assertEquals(0, roles.size());
+
+        db.stop();
+    }
+
+    @Test
+    public void testRealmWithoutRoleStoreAuthOnly() throws Exception {
+
+        db = new DerbyDataSourceRealm("dsRealmNoRolesAuthOnly");
+        db.setUserTable("users");
+        db.setUserNameCol("user_name");
+        db.setUserCredCol("user_pass");
+        db.setAllRolesMode("authOnly");
+
+        // Create only the users table, no role store is configured
+        Connection connection = db.open();
+        for (String sql: SIMPLE_SCHEMA.split(";")) {
+            if (sql.contains("user_roles")) {
+                continue;
+            }
+            try (Statement statement = connection.createStatement()) {
+                statement.execute(sql);
+            }
+        }
+
+        try (PreparedStatement stmt = connection.prepareStatement(USERS_INSERT)) {
+            stmt.setString(1, "tomcat");
+            stmt.setString(2, "password");
+            stmt.executeUpdate();
+        }
+
+        db.start();
+
+        // Authentication only configuration. A valid user must still be able
+        // to log in, with an empty role list.
+        Assert.assertNull(db.authenticate("tomcat", "bar"));
+
+        Principal p = db.authenticate("tomcat", "password");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        Assert.assertEquals(0, ((GenericPrincipal) p).getRoles().length);
+
+        p = db.getPrincipal("tomcat");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        Assert.assertEquals(0, ((GenericPrincipal) p).getRoles().length);
+
+        // The user must still exist in the database
+        Assert.assertNull(db.getPrincipal("blabla"));
+        Assert.assertNull(db.authenticate("blabla"));
+
+        db.stop();
+    }
+
+    @Test
+    public void testRoleLookupFailure() throws Exception {
+
+        db = new DerbyDataSourceRealm("dsRealmRoleFailure");
+        db.setUserTable("users");
+        db.setUserNameCol("user_name");
+        db.setUserCredCol("user_pass");
+        db.setUserRoleTable("user_roles");
+        db.setRoleNameCol("role_name");
+
+        // Create only the users table. The configured role table is missing so
+        // every role lookup will fail.
+        Connection connection = db.open();
+        String rolesSchema = null;
+        for (String sql: SIMPLE_SCHEMA.split(";")) {
+            if (sql.contains("user_roles")) {
+                rolesSchema = sql;
+                continue;
+            }
+            try (Statement statement = connection.createStatement()) {
+                statement.execute(sql);
+            }
+        }
+
+        try (PreparedStatement stmt = connection.prepareStatement(USERS_INSERT)) {
+            stmt.setString(1, "tomcat");
+            stmt.setString(2, "password");
+            stmt.executeUpdate();
+        }
+
+        db.start();
+
+        // A failed role lookup must fail authentication rather than return a
+        // Principal without roles
+        Assert.assertNull(db.getRoles("tomcat"));
+        Assert.assertNull(db.authenticate("tomcat", "password"));
+        Assert.assertNull(db.getPrincipal("tomcat"));
+        Assert.assertNull(db.authenticate("tomcat"));
+
+        // Once the role lookup works, authentication succeeds again
+        Assert.assertNotNull(rolesSchema);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(rolesSchema);
+        }
+        try (PreparedStatement stmt = connection.prepareStatement(ROLES_INSERT)) {
+            stmt.setString(1, "tomcat");
+            stmt.setString(2, "admin");
+            stmt.executeUpdate();
+        }
+
+        Principal p = db.authenticate("tomcat", "password");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        Assert.assertTrue(((GenericPrincipal) p).hasRole("admin"));
+
+        p = db.getPrincipal("tomcat");
+        Assert.assertTrue(p instanceof GenericPrincipal);
+        Assert.assertTrue(((GenericPrincipal) p).hasRole("admin"));
+
+        db.stop();
+    }
+
+    @Test
+    public void testDatabaseUnavailable() throws Exception {
+
+        // No container, so no naming context and no DataSource. open() will
+        // always return null.
+        DataSourceRealm unavailable = new DataSourceRealm() {
+            @Override
+            public void initInternal() throws LifecycleException {
+                // Avoid heavy lifecycle and JMX, however container log is needed
+                containerLog = log;
+            }
+        };
+        unavailable.setDataSourceName("jdbc/missing");
+        unavailable.setUserTable("users");
+        unavailable.setUserNameCol("user_name");
+        unavailable.setUserCredCol("user_pass");
+        unavailable.setUserRoleTable("user_roles");
+        unavailable.setRoleNameCol("role_name");
+
+        unavailable.start();
+
+        // No Principal may be returned if the database cannot be reached
+        Assert.assertNull(unavailable.authenticate("tomcat", "password"));
+        Assert.assertNull(unavailable.getPrincipal("tomcat"));
+        Assert.assertNull(unavailable.authenticate("tomcat"));
+        Assert.assertFalse(unavailable.isAvailable());
+
+        unavailable.stop();
     }
 }
