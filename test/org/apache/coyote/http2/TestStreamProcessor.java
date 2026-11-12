@@ -42,6 +42,7 @@ import org.apache.catalina.startup.Tomcat;
 import org.apache.tomcat.util.compat.JrePlatform;
 import org.apache.tomcat.util.http.FastHttpDateFormat;
 import org.apache.tomcat.util.http.Method;
+import org.apache.tomcat.util.http.MimeHeaders;
 
 public class TestStreamProcessor extends Http2TestBase {
 
@@ -432,6 +433,118 @@ public class TestStreamProcessor extends Http2TestBase {
 
         // The status code is the most important thing to test
         Assert.assertTrue(output.getTrace().startsWith(expected.toString()));
+    }
+
+
+    @Test
+    public void testBadRequestNoteClearedOnRecycle() throws Exception {
+        http2Connect();
+
+        // Valid :authority but invalid (incorrectly formatted) host header -> 400 response
+        List<Header> headers = new ArrayList<>(5);
+        headers.add(new Header(":method", Method.GET));
+        headers.add(new Header(":scheme", "http"));
+        headers.add(new Header(":path", "/simple"));
+        headers.add(new Header(":authority", "localhost:" + getPort()));
+        headers.add(new Header("host", "local!host:" + getPort()));
+
+        byte[] frameHeader = new byte[9];
+        ByteBuffer headersPayload = ByteBuffer.allocate(128);
+
+        buildGetRequest(frameHeader, headersPayload, null, headers, 3);
+        writeFrame(frameHeader, headersPayload);
+
+        while (!output.getTrace().contains("3-EndOfStream")) {
+            parser.readFrame();
+        }
+        Assert.assertTrue(output.getTrace(), output.getTrace().contains("3-Header-[:status]-[400]"));
+        output.clearTrace();
+
+        // Requests for streams 1 and 3 need to be returned to the pool before the request for stream 5 is received
+        waitForRecycledRequests(2);
+
+        // The request for stream 5 re-uses the request from stream 3 and must not be treated as a bad request
+        sendSimpleGetRequest(5);
+
+        parser.readFrame();
+        Assert.assertTrue(output.getTrace(), output.getTrace().contains("5-Header-[:status]-[200]"));
+        parser.readFrame();
+        Assert.assertEquals(getSimpleResponseTrace(5), output.getTrace());
+    }
+
+
+    @Test
+    public void testBadRequestNoteInTrailersClearedOnRecycle() throws Exception {
+        http2Connect();
+
+        // Disable overhead protection for window update as it breaks some tests
+        http2Protocol.setOverheadWindowUpdateThreshold(0);
+
+        byte[] headersFrameHeader = new byte[9];
+        ByteBuffer headersPayload = ByteBuffer.allocate(128);
+        byte[] dataFrameHeader = new byte[9];
+        ByteBuffer dataPayload = ByteBuffer.allocate(256);
+
+        // Valid POST request. End of stream is signalled by the trailer headers.
+        buildPostRequest(headersFrameHeader, headersPayload, false, dataFrameHeader, dataPayload, null, true, 3);
+        writeFrame(headersFrameHeader, headersPayload);
+        writeFrame(dataFrameHeader, dataPayload);
+
+        /*
+         * The window update is sent once the servlet starts reading the request body. Once it has been received the
+         * request has been validated so the trailer headers will mark the request as bad after validation.
+         */
+        while (!output.getTrace().contains("0-WindowSize-[")) {
+            parser.readFrame();
+        }
+
+        // Invalid (incorrectly formatted) host header in the trailer headers
+        byte[] trailerFrameHeader = new byte[9];
+        ByteBuffer trailerPayload = ByteBuffer.allocate(256);
+        MimeHeaders trailerHeaders = new MimeHeaders();
+        trailerHeaders.addValue("host").setString("local!host:" + getPort());
+        hpackEncoder.encode(trailerHeaders, trailerPayload);
+        trailerPayload.flip();
+        ByteUtil.setThreeBytes(trailerFrameHeader, 0, trailerPayload.limit());
+        trailerFrameHeader[3] = FrameType.HEADERS.getIdByte();
+        // Flags. end of headers (0x04) and end of stream (0x01)
+        trailerFrameHeader[4] = 0x05;
+        // Stream id
+        ByteUtil.set31Bits(trailerFrameHeader, 5, 3);
+        writeFrame(trailerFrameHeader, trailerPayload);
+
+        while (!output.getTrace().contains("3-EndOfStream")) {
+            parser.readFrame();
+        }
+        Assert.assertTrue(output.getTrace(), output.getTrace().contains("3-Header-[:status]-[200]"));
+        output.clearTrace();
+
+        // Requests for streams 1 and 3 need to be returned to the pool before the request for stream 5 is received
+        waitForRecycledRequests(2);
+
+        // The request for stream 5 re-uses the request from stream 3 and must not be treated as a bad request
+        sendSimpleGetRequest(5);
+
+        parser.readFrame();
+        Assert.assertTrue(output.getTrace(), output.getTrace().contains("5-Header-[:status]-[200]"));
+        parser.readFrame();
+        Assert.assertEquals(getSimpleResponseTrace(5), output.getTrace());
+    }
+
+
+    private void waitForRecycledRequests(int count) throws InterruptedException {
+        /*
+         * The request statistics are updated by StreamProcessor.recycle() immediately before the request is returned to
+         * the pool by Stream.recycle().
+         */
+        int wait = 0;
+        while (http2Protocol.getGlobal().getRequestCount() < count && wait < 100) {
+            Thread.sleep(100);
+            wait++;
+        }
+        Assert.assertTrue(http2Protocol.getGlobal().getRequestCount() >= count);
+        // Allow time for Stream.recycle() to complete
+        Thread.sleep(100);
     }
 
 
