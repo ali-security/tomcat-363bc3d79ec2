@@ -1114,4 +1114,83 @@ public class TestRewriteValve extends TomcatBaseTest {
                 URLDecoder.decode(expectedSegment, StandardCharsets.UTF_8)));
         Assert.assertTrue(body, body.contains("REQUEST-QUERY-STRING: " + expectedQueryString));
     }
+
+    @Test
+    public void testOrCondDoesNotSkipNonOrCond() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        Context ctx = getProgrammaticRootContext();
+
+        RewriteValve rewriteValve = new RewriteValve();
+        ctx.getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration(
+                "RewriteCond %{HTTP_HOST} localhost [OR]\n" +
+                        "RewriteCond %{HTTP_HOST} 127.0.0.1\n" +
+                        "RewriteCond %{REQUEST_URI} ^/admin\n" +
+                "RewriteRule ^(.*) /blocked$1 [R]");
+
+        Tomcat.addServlet(ctx, "snoop", new SnoopServlet());
+        ctx.addServletMappingDecoded("/other", "snoop");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + "/other", res, false);
+
+        Assert.assertEquals(HttpServletResponse.SC_OK, rc);
+
+        res.setCharset(StandardCharsets.UTF_8);
+        String body = res.toString();
+        Assert.assertTrue(body, body.contains("REQUEST-URI: /other"));
+    }
+
+    @Test
+    public void testOrCondSecondMemberDoesNotSkipNonOrCond() throws Exception {
+        // The last member of the OR group matches, the following non-OR
+        // condition must still be evaluated
+        doTestRewrite("RewriteCond %{HTTP_HOST} 127.0.0.1 [OR]\n" +
+                "RewriteCond %{HTTP_HOST} localhost\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/admin.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked/$1", "/c/other", "/c/other");
+    }
+
+    @Test
+    public void testOrCondAndNonOrCondMatch() throws Exception {
+        // Both the OR group and the following non-OR condition match
+        doTestRewrite("RewriteCond %{HTTP_HOST} 127.0.0.1 [OR]\n" +
+                "RewriteCond %{HTTP_HOST} localhost\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/admin.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked/$1", "/c/admin", "/c/blocked/admin");
+    }
+
+    @Test
+    public void testOrCondNotExtendedToNonOrCond() throws Exception {
+        // No member of the OR group matches, a match of the following non-OR
+        // condition alone must not apply the rule
+        doTestRewrite("RewriteCond %{HTTP_HOST} 127.0.0.1 [OR]\n" +
+                "RewriteCond %{HTTP_HOST} example.com\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/admin.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked/$1", "/c/admin", "/c/admin");
+    }
+
+    @Test
+    public void testOrCondThreeMembersDoesNotSkipNonOrCond() throws Exception {
+        doTestRewrite("RewriteCond %{HTTP_HOST} localhost [OR]\n" +
+                "RewriteCond %{HTTP_HOST} 127.0.0.1 [OR]\n" +
+                "RewriteCond %{HTTP_HOST} example.com\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/admin.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked/$1", "/c/other", "/c/other");
+    }
+
+    @Test
+    public void testOrCondDoesNotSkipFollowingOrGroup() throws Exception {
+        // The first OR group matches, the second OR group must still be
+        // evaluated
+        doTestRewrite("RewriteCond %{HTTP_HOST} localhost [OR]\n" +
+                "RewriteCond %{HTTP_HOST} 127.0.0.1\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/admin.* [OR]\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/secret.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked/$1", "/c/other", "/c/other");
+    }
 }
