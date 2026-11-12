@@ -300,7 +300,7 @@ public class TestHttp2Section_8_1 extends Http2TestBase {
         parser.readFrame();
 
         String trace = output.getTrace();
-        Assert.assertTrue(trace, trace.contains("3-Header-[:status]-[400]"));
+        Assert.assertTrue(trace, trace.contains("3-RST-[1]"));
     }
 
 
@@ -324,7 +324,32 @@ public class TestHttp2Section_8_1 extends Http2TestBase {
         parser.readFrame();
 
         String trace = output.getTrace();
-        Assert.assertTrue(trace, trace.contains("3-Header-[:status]-[400]"));
+        Assert.assertTrue(trace, trace.contains("3-RST-[1]"));
+    }
+
+
+    @Test
+    public void testAuthorityHeaderMissing() throws Exception {
+        http2Connect();
+
+        // Neither an :authority pseudo header nor a host header
+        List<Header> headers = new ArrayList<>(3);
+        headers.add(new Header(":method", Method.GET));
+        headers.add(new Header(":scheme", "http"));
+        headers.add(new Header(":path", "/simple"));
+
+        byte[] headersFrameHeader = new byte[9];
+        ByteBuffer headersPayload = ByteBuffer.allocate(128);
+
+        buildGetRequest(headersFrameHeader, headersPayload, null, headers, 3);
+
+        writeFrame(headersFrameHeader, headersPayload);
+
+        parser.readFrame();
+
+        String trace = output.getTrace();
+        Assert.assertTrue(trace, trace.contains("3-RST-[1]"));
+        Assert.assertFalse(trace, trace.contains("3-Header-[:status]-[200]"));
     }
 
 
